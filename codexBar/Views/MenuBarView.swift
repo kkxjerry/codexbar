@@ -3,45 +3,83 @@ import Combine
 import UserNotifications
 
 struct MenuBarView: View {
+    private enum SwitchRequestOrigin {
+        case manual
+        case automaticSuggestion
+        case bridgeAuto
+
+        var bridgeSource: ControlPendingSwitchSource {
+            switch self {
+            case .manual: return .manual
+            case .automaticSuggestion: return .automaticSuggestion
+            case .bridgeAuto: return .bridgeAuto
+            }
+        }
+    }
+
     @EnvironmentObject var store: TokenStore
     @EnvironmentObject var oauth: OAuthManager
+    @EnvironmentObject var permissions: PermissionManager
+    private let runtimeMonitor = CodexRuntimeMonitor.shared
+    private let bridge = ControlBridge.shared
     @State private var isRefreshing = false
     @State private var showError: String?
     @State private var showSuccess: String?
     @State private var now = Date()
     @State private var refreshingAccounts: Set<String> = []
+    @State private var pendingSwitchIdentityKey: String?
+    @State private var pendingSwitchOrigin: SwitchRequestOrigin = .manual
+    @State private var pendingSwitchReady = false
+    @State private var switchPromptVisible = false
+    @State private var dismissedAutomaticSwitchIdentityKey: String?
 
     // 每 10 秒刷新倒计时显示
     private let countdownTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
     // 菜单打开时 10 秒快速刷新活跃账号；菜单关闭时 5 分钟后台刷新全部
     private let quickTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
     private let slowTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+    private let pendingSwitchTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     @State private var menuVisible = false
     @State private var languageToggle = false  // 用于触发语言切换后的重绘
 
-    /// email → accounts (sorted: active first, then by status)
-    private var groupedAccounts: [(email: String, accounts: [TokenAccount])] {
+    /// workspace/personal group → accounts
+    private var groupedAccounts: [(id: String, title: String, accounts: [TokenAccount])] {
         var dict: [String: [TokenAccount]] = [:]
-        var order: [String] = []
+        var titles: [String: String] = [:]
+        var personalFlags: [String: Bool] = [:]
+
         for acc in store.accounts {
-            if dict[acc.email] == nil {
-                dict[acc.email] = []
-                order.append(acc.email)
-            }
-            dict[acc.email]!.append(acc)
+            let key = acc.workspaceGroupKey
+            dict[key, default: []].append(acc)
+            titles[key] = acc.workspaceGroupTitle
+            personalFlags[key] = acc.isPersonalWorkspace
         }
-        // sort accounts within each group
-        let sortedOrder = order.sorted { e1, e2 in
-            let best1 = bestStatus(dict[e1]!)
-            let best2 = bestStatus(dict[e2]!)
-            return best1 < best2
+
+        let sortedKeys = dict.keys.sorted { key1, key2 in
+            let personal1 = personalFlags[key1] ?? false
+            let personal2 = personalFlags[key2] ?? false
+            if personal1 != personal2 { return !personal1 }
+
+            let best1 = bestStatus(dict[key1]!)
+            let best2 = bestStatus(dict[key2]!)
+            if best1 != best2 { return best1 < best2 }
+
+            let title1 = titles[key1] ?? key1
+            let title2 = titles[key2] ?? key2
+            return title1.localizedCaseInsensitiveCompare(title2) == .orderedAscending
         }
-        return sortedOrder.map { email in
-            let sorted = dict[email]!.sorted { a, b in
+
+        return sortedKeys.map { key in
+            let sorted = dict[key]!.sorted { a, b in
                 if a.isActive != b.isActive { return a.isActive }
-                return statusRank(a) < statusRank(b)
+                if statusRank(a) != statusRank(b) { return statusRank(a) < statusRank(b) }
+                return a.rowTitle.localizedCaseInsensitiveCompare(b.rowTitle) == .orderedAscending
             }
-            return (email: email, accounts: sorted)
+            return (
+                id: key,
+                title: titles[key] ?? key,
+                accounts: sorted
+            )
         }
     }
 
@@ -60,6 +98,11 @@ struct MenuBarView: View {
 
     private var availableCount: Int {
         store.accounts.filter { $0.usageStatus == .ok }.count
+    }
+
+    private var pendingSwitchAccount: TokenAccount? {
+        guard let key = pendingSwitchIdentityKey else { return nil }
+        return store.accounts.first { $0.identityKey == key }
     }
 
     var body: some View {
@@ -113,30 +156,30 @@ struct MenuBarView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(groupedAccounts, id: \.email) { group in
-                            VStack(alignment: .leading, spacing: 2) {
-                                // Email group header
-                                Text(group.email)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                    .padding(.leading, 4)
+                        if !store.accounts.isEmpty {
+                            ForEach(groupedAccounts, id: \.id) { group in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(group.title)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                        .padding(.leading, 4)
 
-                                // Account rows
-                                ForEach(group.accounts) { account in
-                                    AccountRowView(
-                                        account: account,
-                                        isActive: account.isActive,
-                                        now: now,
-                                        isRefreshing: refreshingAccounts.contains(account.id)
-                                    ) {
-                                        activateAccount(account)
-                                    } onRefresh: {
-                                        Task { await refreshAccount(account) }
-                                    } onReauth: {
-                                        reauthAccount(account)
-                                    } onDelete: {
-                                        store.remove(account)
+                                    ForEach(group.accounts) { account in
+                                        AccountRowView(
+                                            account: account,
+                                            isActive: account.isActive,
+                                            now: now,
+                                            isRefreshing: refreshingAccounts.contains(account.id)
+                                        ) {
+                                            activateAccount(account)
+                                        } onRefresh: {
+                                            Task { await refreshAccount(account) }
+                                        } onReauth: {
+                                            reauthAccount(account)
+                                        } onDelete: {
+                                            store.remove(account)
+                                        }
                                     }
                                 }
                             }
@@ -145,7 +188,7 @@ struct MenuBarView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
                 }
-                .frame(maxHeight: 380)
+                .frame(maxHeight: 520)
             }
 
             if let success = showSuccess {
@@ -181,8 +224,6 @@ struct MenuBarView: View {
                 .padding(.vertical, 6)
             }
 
-            Divider()
-
             // 底部操作栏
             HStack(spacing: 8) {
                 if let lastUpdate = store.accounts.compactMap({ $0.lastChecked }).max() {
@@ -212,6 +253,18 @@ struct MenuBarView: View {
                 .help(L.addAccount)
 
                 Button {
+                    store.clearAllAccounts()
+                    showError = nil
+                    showSuccess = "已清空账号池。"
+                    publishBridgeStatus()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.borderless)
+                .help("清空账号池")
+
+                Button {
                     switch L.languageOverride {
                     case nil:   L.languageOverride = true
                     case true:  L.languageOverride = false
@@ -239,8 +292,11 @@ struct MenuBarView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .frame(width: 300)
+        .frame(width: 360)
         .onReceive(countdownTimer) { _ in now = Date() }
+        .onReceive(pendingSwitchTimer) { _ in
+            handlePendingSwitch()
+        }
         .onReceive(quickTimer) { _ in
             guard menuVisible,
                   let active = store.accounts.first(where: { $0.isActive }),
@@ -261,6 +317,8 @@ struct MenuBarView: View {
         .onAppear {
             menuVisible = true
             store.markActiveAccount()
+            publishBridgeStatus()
+            handlePendingSwitch()
         }
         .onDisappear { menuVisible = false }
     }
@@ -273,16 +331,168 @@ struct MenuBarView: View {
     }
 
     private func activateAccount(_ account: TokenAccount) {
+        requestSwitch(to: account, origin: .manual)
+    }
+
+    private func requestSwitch(to account: TokenAccount, origin: SwitchRequestOrigin) {
+        guard !account.isActive else { return }
+
+        let running = runtimeMonitor.runningCodexApplications()
+        let hasRecentActivity = runtimeMonitor.hasRecentTaskActivity()
+
+        if origin != .manual, pendingSwitchIdentityKey != nil {
+            return
+        }
+
+        if hasRecentActivity {
+            queuePendingSwitch(for: account, origin: origin, markReady: false, showAlert: origin == .manual)
+            return
+        }
+
+        if origin == .automaticSuggestion && !menuVisible {
+            queuePendingSwitch(for: account, origin: origin, markReady: true, showAlert: false)
+            return
+        }
+
+        if origin == .bridgeAuto {
+            performSwitch(account, running: running)
+        } else {
+            confirmAndSwitch(account, running: running)
+        }
+    }
+
+    private func queuePendingSwitch(
+        for account: TokenAccount,
+        origin: SwitchRequestOrigin,
+        markReady: Bool,
+        showAlert: Bool
+    ) {
+        if origin == .automaticSuggestion,
+           dismissedAutomaticSwitchIdentityKey == account.identityKey {
+            return
+        }
+
+        let isSamePending = pendingSwitchIdentityKey == account.identityKey
+        if isSamePending, pendingSwitchReady == markReady, !showAlert {
+            return
+        }
+
+        pendingSwitchIdentityKey = account.identityKey
+        pendingSwitchOrigin = origin
+        pendingSwitchReady = markReady
+        showError = nil
+
+        if origin == .manual {
+            dismissedAutomaticSwitchIdentityKey = nil
+        }
+
+        showSuccess = markReady ? L.switchReadyBody(account.rowTitle) : L.switchScheduled(account.rowTitle)
+
+        if origin == .automaticSuggestion {
+            let activeLabel = store.activeAccount()?.rowTitle ?? store.activeAccount()?.email ?? ""
+            sendNotification(
+                title: L.autoSwitchSuggestedTitle,
+                body: L.autoSwitchSuggestedBody(activeLabel.isEmpty ? L.switchAccount : activeLabel, account.rowTitle)
+            )
+        } else if markReady, !isSamePending {
+            sendNotification(title: L.switchReadyTitle, body: L.switchReadyBody(account.rowTitle))
+        }
+
+        if !showAlert {
+            publishBridgeStatus()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = L.switchQueuedTitle
+        alert.informativeText = L.switchQueuedBody(account.rowTitle)
+        alert.addButton(withTitle: L.gotIt)
+        alert.runModal()
+        publishBridgeStatus()
+    }
+
+    private func handlePendingSwitch() {
+        guard let account = pendingSwitchAccount else {
+            clearPendingSwitch()
+            return
+        }
+
+        if !pendingSwitchReady {
+            guard !runtimeMonitor.hasRecentTaskActivity() else { return }
+            pendingSwitchReady = true
+            showSuccess = L.switchReadyBody(account.rowTitle)
+            if pendingSwitchOrigin != .bridgeAuto {
+                sendNotification(title: L.switchReadyTitle, body: L.switchReadyBody(account.rowTitle))
+            }
+            publishBridgeStatus()
+        }
+
+        guard pendingSwitchReady else { return }
+
+        if pendingSwitchOrigin == .bridgeAuto {
+            performSwitch(account, running: runtimeMonitor.runningCodexApplications())
+            return
+        }
+
+        guard menuVisible, !switchPromptVisible else { return }
+        confirmAndSwitch(account, running: runtimeMonitor.runningCodexApplications())
+    }
+
+    private func clearPendingSwitch() {
+        pendingSwitchIdentityKey = nil
+        pendingSwitchOrigin = .manual
+        pendingSwitchReady = false
+        publishBridgeStatus()
+    }
+
+    private func confirmAndSwitch(_ account: TokenAccount, running: [NSRunningApplication]) {
+        switchPromptVisible = true
+        defer { switchPromptVisible = false }
+
+        let alert = NSAlert()
+        alert.messageText = L.switchPromptTitle(account.rowTitle)
+        alert.informativeText = running.isEmpty
+            ? L.switchPromptInfoStopped(account.rowTitle)
+            : L.switchPromptInfoRunning(account.rowTitle)
+        alert.addButton(withTitle: L.confirmSwitchAction)
+        alert.addButton(withTitle: L.cancel)
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            if pendingSwitchAccount?.identityKey == account.identityKey {
+                if pendingSwitchOrigin == .automaticSuggestion {
+                    dismissedAutomaticSwitchIdentityKey = account.identityKey
+                }
+                clearPendingSwitch()
+            }
+            return
+        }
+
+        performSwitch(account, running: running)
+    }
+
+    private func performSwitch(_ account: TokenAccount, running: [NSRunningApplication]) {
         do {
             try store.activate(account)
+            clearPendingSwitch()
+            dismissedAutomaticSwitchIdentityKey = nil
+            showError = nil
+
+            if running.isEmpty {
+                showSuccess = L.switchApplied(account.rowTitle)
+            } else {
+                showSuccess = L.switchAppliedAndRestarting(account.rowTitle)
+                restartCodex(running)
+            }
         } catch {
             showError = error.localizedDescription
         }
+        publishBridgeStatus()
     }
 
     /// 检查当前账号额度，必要时自动切换到最优账号
     private func autoSwitchIfNeeded() {
         guard let active = store.accounts.first(where: { $0.isActive }) else { return }
+        guard pendingSwitchIdentityKey == nil else { return }
 
         let primary5hRemaining  = 100.0 - active.primaryUsedPercent
         let secondary7dRemaining = 100.0 - active.secondaryUsedPercent
@@ -292,7 +502,7 @@ struct MenuBarView: View {
 
         // 找最优账号：未被封禁、token 未过期、非当前账号、usageStatus 最优
         let candidates = store.accounts.filter {
-            !$0.isSuspended && !$0.tokenExpired && $0.accountId != active.accountId
+            !$0.isSuspended && !$0.tokenExpired && $0.identityKey != active.identityKey
         }.sorted {
             if statusRank($0) != statusRank($1) { return statusRank($0) < statusRank($1) }
             let rem0 = min(100 - $0.primaryUsedPercent, 100 - $0.secondaryUsedPercent)
@@ -306,19 +516,120 @@ struct MenuBarView: View {
             return
         }
 
-        do {
-            try store.activate(best)
-            sendAutoSwitchNotification(from: active, to: best)
-        } catch {
-            // 静默失败，等下次扫描再试
+        guard dismissedAutomaticSwitchIdentityKey != best.identityKey else { return }
+
+        requestSwitch(to: best, origin: .automaticSuggestion)
+    }
+
+    private func bridgeHeartbeat() {
+        processBridgeCommand()
+        publishBridgeStatus()
+    }
+
+    private func processBridgeCommand() {
+        guard let handle = bridge.nextCommand() else { return }
+
+        switch handle.command.action {
+        case .switchWhenIdle:
+            guard let identityKey = handle.command.identityKey, !identityKey.isEmpty else {
+                bridge.finish(handle, status: .error, message: "Missing identityKey.")
+                return
+            }
+
+            guard pendingSwitchIdentityKey == nil else {
+                bridge.finish(handle, status: .error, message: "Another switch is already pending.")
+                return
+            }
+
+            guard let account = store.accounts.first(where: { $0.identityKey == identityKey }) else {
+                bridge.finish(handle, status: .error, message: "Account not found.")
+                return
+            }
+
+            if account.isActive {
+                bridge.finish(handle, status: .success, message: "Account is already active.")
+                return
+            }
+
+            let busy = runtimeMonitor.hasRecentTaskActivity()
+            requestSwitch(to: account, origin: .bridgeAuto)
+            bridge.finish(
+                handle,
+                status: busy ? .accepted : .success,
+                message: busy
+                    ? "Queued switch to \(account.rowTitle) until Codex becomes idle."
+                    : "Switched to \(account.rowTitle)."
+            )
+
+        case .cancelPendingSwitch:
+            if let pending = pendingSwitchAccount {
+                clearPendingSwitch()
+                showSuccess = "Cancelled pending switch to \(pending.rowTitle)."
+                bridge.finish(handle, status: .success, message: "Cancelled pending switch.")
+            } else {
+                bridge.finish(handle, status: .success, message: "No pending switch to cancel.")
+            }
+
+        case .refreshNow:
+            bridge.finish(handle, status: .accepted, message: "Refresh requested.")
+            Task {
+                await refresh()
+                publishBridgeStatus()
+            }
         }
     }
 
-    private func sendAutoSwitchNotification(from old: TokenAccount, to new: TokenAccount) {
-        sendNotification(
-            title: L.autoSwitchTitle,
-            body: L.autoSwitchBody(old.organizationName ?? old.email, new.organizationName ?? new.email)
+    private func publishBridgeStatus() {
+        let activeAccount = store.activeAccount()
+        let pending: ControlPendingSwitch? = pendingSwitchAccount.map { account in
+            ControlPendingSwitch(
+                identityKey: account.identityKey,
+                email: account.rowTitle,
+                workspace: account.workspaceGroupTitle,
+                ready: pendingSwitchReady,
+                source: pendingSwitchOrigin.bridgeSource
+            )
+        }
+
+        let accounts = store.accounts.map { account in
+            ControlAccountSummary(
+                identityKey: account.identityKey,
+                email: account.rowTitle,
+                workspace: account.workspaceGroupTitle,
+                planType: account.planType,
+                isActive: account.isActive,
+                usageStatus: usageStatusName(account.usageStatus),
+                primaryUsedPercent: account.primaryUsedPercent,
+                secondaryUsedPercent: account.secondaryUsedPercent,
+                tokenExpired: account.tokenExpired,
+                isSuspended: account.isSuspended
+            )
+        }
+
+        let status = ControlStatus(
+            updatedAt: Date(),
+            appRunning: true,
+            codexRunning: !runtimeMonitor.runningCodexApplications().isEmpty,
+            codexBusy: runtimeMonitor.hasRecentTaskActivity(),
+            fullDiskAccessGranted: permissions.fullDiskAccessGranted,
+            activeIdentityKey: activeAccount?.identityKey,
+            activeEmail: activeAccount?.rowTitle,
+            pendingSwitch: pending,
+            lastSuccess: showSuccess,
+            lastError: showError,
+            accounts: accounts
         )
+
+        bridge.writeStatus(status)
+    }
+
+    private func usageStatusName(_ status: UsageStatus) -> String {
+        switch status {
+        case .ok: return "ok"
+        case .warning: return "warning"
+        case .exceeded: return "exceeded"
+        case .banned: return "banned"
+        }
     }
 
     private func sendNotification(title: String, body: String) {
@@ -338,28 +649,16 @@ struct MenuBarView: View {
         }
     }
 
-    private func forceQuitCodex(_ running: [NSRunningApplication], reopen: Bool) {
+    private func restartCodex(_ running: [NSRunningApplication]) {
         let ws = NSWorkspace.shared
-
-        if reopen {
-            guard let url = ws.urlForApplication(withBundleIdentifier: "com.openai.codex") else {
-                running.forEach { $0.forceTerminate() }
-                return
-            }
-            var observer: NSObjectProtocol?
-            observer = ws.notificationCenter.addObserver(
-                forName: NSWorkspace.didTerminateApplicationNotification,
-                object: nil,
-                queue: .main
-            ) { note in
-                guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                      app.bundleIdentifier == "com.openai.codex" else { return }
-                ws.notificationCenter.removeObserver(observer!)
-                ws.open(url)
-            }
-        }
+        let url = ws.urlForApplication(withBundleIdentifier: "com.openai.codex")
 
         running.forEach { $0.forceTerminate() }
+
+        guard let url else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            ws.open(url)
+        }
     }
 
     private func refresh() async {
@@ -379,8 +678,8 @@ struct MenuBarView: View {
             switch result {
             case .success(let tokens):
                 var updated = AccountBuilder.build(from: tokens)
-                // 若 account_id 匹配，覆盖原账号；否则按新账号添加
-                if updated.accountId == account.accountId {
+                // 同一个 team 下的不同成员要能并存，因此按成员级 identityKey 判断是否覆盖
+                if updated.identityKey == account.identityKey {
                     updated.isActive = account.isActive
                     updated.tokenExpired = false
                     updated.isSuspended = false

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One org/account row under an email group
+/// One account row under a workspace/personal group
 struct AccountRowView: View {
     let account: TokenAccount
     let isActive: Bool
@@ -194,8 +194,7 @@ struct AccountRowView: View {
     }
 
     private var displayName: String {
-        if let org = account.organizationName, !org.isEmpty { return org }
-        return String(account.accountId.prefix(8))
+        account.rowTitle
     }
 
     private var statusColor: Color {

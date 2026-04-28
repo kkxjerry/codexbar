@@ -17,6 +17,16 @@ A macOS menu bar app for managing multiple ChatGPT/Codex accounts. Switch accoun
 - **Status indicators** — Color-coded badges and menu bar icon reflect account health (normal / warning / quota exhausted / suspended)
 - **Animated UI** — Progress bars and percentages animate on update
 
+## Supervisor Automation
+
+This repository also includes a local quota supervisor workflow for unattended use:
+
+- `quota-watcher.py` on the Desktop monitors the active account and waits for Codex to become idle before switching
+- `codexbarctl` exposes local control commands for status, account listing, refresh, and safe switching
+- the supervisor can maintain a task ledger and resume queued work after a switch
+
+See [README-supervisor.md](README-supervisor.md) for the full operator guide, task examples, and the recommended way to describe tasks to another agent.
+
 ## Requirements
 
 - macOS 13 Ventura or later
@@ -72,6 +82,17 @@ CodexAppBar 是一个 macOS 状态栏应用，用于管理多个 ChatGPT/Codex �
 - **账号切换**（实验性）— 将选中账号写入 `~/.codex/auth.json`，需退出 Codex.app 后生效。使用 subagent 时建议通过软件内退出登录功能切换账号
 - **自动刷新** — 菜单打开时活跃账号每 10 秒刷新；后台每 5 分钟刷新所有账号
 - **状态指示** — 彩色徽章和状态栏图标直观反映账号状态（正常 / 即将用尽 / 额度耗尽 / 已停用）
+
+### 无人值守 Supervisor
+
+这个仓库现在还配套了一套本地额度守卫工作流：
+
+- 桌面的 `quota-watcher.py` 会持续监控当前活跃账号
+- 触发阈值后不会立刻切号，而是等待 Codex 空闲再安全切换
+- `codexbarctl` 提供本地控制入口，方便外部 agent 调用
+- supervisor 可以维护任务账本，并在切号后恢复待执行任务
+
+完整的使用说明、给 Azine 下任务的话术模板、任务数据结构和操作示例见 [README-supervisor.md](README-supervisor.md)。
 
 ### 系统要求
 

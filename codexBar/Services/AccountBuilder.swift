@@ -7,6 +7,7 @@ struct AccountBuilder {
         let authClaims = claims["https://api.openai.com/auth"] as? [String: Any] ?? [:]
 
         let accountId = authClaims["chatgpt_account_id"] as? String ?? ""
+        let accountUserId = authClaims["chatgpt_account_user_id"] as? String ?? ""
         let planType = authClaims["chatgpt_plan_type"] as? String ?? "free"
 
         // 从 id_token 取 email
@@ -30,12 +31,19 @@ struct AccountBuilder {
         return TokenAccount(
             email: email,
             accountId: accountId,
+            accountUserId: accountUserId,
             accessToken: tokens.accessToken,
             refreshToken: tokens.refreshToken,
             idToken: tokens.idToken,
             expiresAt: expiresAt ?? tokenExpiresAt,
             planType: planType
         )
+    }
+
+    static func accountUserId(fromAccessToken token: String) -> String {
+        let claims = decodeJWT(token)
+        let authClaims = claims["https://api.openai.com/auth"] as? [String: Any] ?? [:]
+        return authClaims["chatgpt_account_user_id"] as? String ?? ""
     }
 
     /// 解码 JWT payload（不验签）

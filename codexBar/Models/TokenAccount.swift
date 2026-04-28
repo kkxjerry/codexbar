@@ -1,9 +1,10 @@
 import Foundation
 
 struct TokenAccount: Codable, Identifiable {
-    var id: String { accountId }
+    var id: String { identityKey }
     var email: String
     var accountId: String
+    var accountUserId: String
     var accessToken: String
     var refreshToken: String
     var idToken: String
@@ -22,6 +23,7 @@ struct TokenAccount: Codable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case email
         case accountId = "account_id"
+        case accountUserId = "account_user_id"
         case organizationName = "organization_name"
         case accessToken = "access_token"
         case refreshToken = "refresh_token"
@@ -42,6 +44,7 @@ struct TokenAccount: Codable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         email = try c.decode(String.self, forKey: .email)
         accountId = try c.decode(String.self, forKey: .accountId)
+        accountUserId = try c.decodeIfPresent(String.self, forKey: .accountUserId) ?? ""
         accessToken = try c.decode(String.self, forKey: .accessToken)
         refreshToken = try c.decode(String.self, forKey: .refreshToken)
         idToken = try c.decode(String.self, forKey: .idToken)
@@ -58,7 +61,7 @@ struct TokenAccount: Codable, Identifiable {
         organizationName = try c.decodeIfPresent(String.self, forKey: .organizationName)
     }
 
-    init(email: String = "", accountId: String = "", accessToken: String = "",
+    init(email: String = "", accountId: String = "", accountUserId: String = "", accessToken: String = "",
          refreshToken: String = "", idToken: String = "", expiresAt: Date? = nil,
          planType: String = "free", primaryUsedPercent: Double = 0,
          secondaryUsedPercent: Double = 0,
@@ -67,6 +70,7 @@ struct TokenAccount: Codable, Identifiable {
          organizationName: String? = nil) {
         self.email = email
         self.accountId = accountId
+        self.accountUserId = accountUserId
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.idToken = idToken
@@ -84,6 +88,55 @@ struct TokenAccount: Codable, Identifiable {
     }
 
     // MARK: - Computed
+
+    var identityKey: String {
+        if !accountUserId.isEmpty { return accountUserId }
+
+        let normalizedEmail = email
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if !accountId.isEmpty && !normalizedEmail.isEmpty {
+            return "\(accountId)|\(normalizedEmail)"
+        }
+        if !accountId.isEmpty { return accountId }
+        return normalizedEmail
+    }
+
+    var rowTitle: String {
+        let normalizedEmail = email
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedEmail.isEmpty { return normalizedEmail }
+        return String(identityKey.prefix(12))
+    }
+
+    var isPersonalWorkspace: Bool {
+        let normalizedOrg = organizationName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        if normalizedOrg == "personal" || normalizedOrg == "个人" {
+            return true
+        }
+
+        return planType.lowercased() != "team"
+    }
+
+    var workspaceGroupTitle: String {
+        if isPersonalWorkspace { return L.personalAccountsGroup }
+
+        if let org = organizationName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !org.isEmpty {
+            return org
+        }
+
+        return String(accountId.prefix(8))
+    }
+
+    var workspaceGroupKey: String {
+        if isPersonalWorkspace { return "__personal_accounts__" }
+        return "workspace:\(workspaceGroupTitle.lowercased())"
+    }
 
     var isBanned: Bool { isSuspended }
     var primaryExhausted: Bool { primaryUsedPercent >= 100 }

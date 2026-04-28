@@ -1,15 +1,24 @@
 import SwiftUI
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AutomationCoordinator.shared.start()
+    }
+}
+
 @main
 struct codexBarApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = TokenStore.shared
     @StateObject private var oauth = OAuthManager.shared
+    @StateObject private var permissions = PermissionManager.shared
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(store)
                 .environmentObject(oauth)
+                .environmentObject(permissions)
         } label: {
             MenuBarIconView(store: store)
         }
