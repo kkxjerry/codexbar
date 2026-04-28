@@ -118,6 +118,40 @@ python3 ~/Desktop/quota-watcher.py --dry-run --verbose
 nohup python3 ~/Desktop/quota-watcher.py > ~/Desktop/quota-watcher.log 2>&1 &
 ```
 
+### 4.7 预热账号池
+
+如果你希望早上先把所有健康账号的 `5h` 窗口启动起来，可以跑：
+
+```bash
+~/Desktop/codexbar/Tools/codexbar-warmup.sh
+```
+
+它会逐个账号执行：
+
+- `codexbarctl switch-auto <identityKey> --wait`
+- `codex exec --ephemeral "只回复：你好"`
+- 最后切回原本的活跃账号
+
+先看计划、不真的消耗额度：
+
+```bash
+~/Desktop/codexbar/Tools/codexbar-warmup.sh --dry-run
+```
+
+只预热前 3 个账号：
+
+```bash
+~/Desktop/codexbar/Tools/codexbar-warmup.sh --limit 3
+```
+
+预热日志会写到：
+
+```text
+~/.codex/codexbar/warmups/
+```
+
+注意：单纯刷新 usage 或切换账号通常不会启动 `5h` 计算窗口，必须有一次非常小的 Codex 请求才算真正预热。
+
 ---
 
 ## 5. 任务账本是什么
